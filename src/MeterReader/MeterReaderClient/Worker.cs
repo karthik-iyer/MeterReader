@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using Grpc.Core;
 using Grpc.Net.Client;
 using MeterReaderWeb.Services;
 using Microsoft.Extensions.Configuration;
@@ -17,13 +18,15 @@ namespace MeterReaderClient
         private readonly ILogger<Worker> _logger;
         private readonly IConfiguration _config;
         private readonly ReadingFactory _factory;
+        private readonly ILoggerFactory _loggerFactory;
         private MeterReadingService.MeterReadingServiceClient _client = null;
 
-        public Worker(ILogger<Worker> logger, IConfiguration config , ReadingFactory factory)
+        public Worker(ILogger<Worker> logger, IConfiguration config , ReadingFactory factory, ILoggerFactory loggerFactory)
         {
             _logger = logger;
             _config = config;
             _factory = factory;
+            _loggerFactory = loggerFactory;
         }
 
         protected MeterReadingService.MeterReadingServiceClient Client
@@ -32,7 +35,12 @@ namespace MeterReaderClient
             {
                  if(_client == null)
                 {
-                    var channel = GrpcChannel.ForAddress(_config["Service:ServerUrl"]);
+                    var opt = new GrpcChannelOptions()
+                    {
+                        LoggerFactory = _loggerFactory
+                    };
+
+                    var channel = GrpcChannel.ForAddress(_config["Service:ServerUrl"], opt);
                     _client = new MeterReadingService.MeterReadingServiceClient(channel);
                 }
                 return _client;
@@ -41,11 +49,28 @@ namespace MeterReaderClient
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            var counter = 0;
+
+            var customerId = _config.GetValue<int>("Service:CustomerId");
+
             while (!stoppingToken.IsCancellationRequested)
             {
+                counter++;
+
+                if(counter % 10 == 0)
+                {
+                    var stream = Client.SendDiagnostics();
+                    for(var x = 0; x < 5; x++)
+                    {
+                        var reading = await _factory.Generate(customerId);
+                        await stream.RequestStream.WriteAsync(reading);
+                    }
+                    await stream.RequestStream.CompleteAsync();
+                }
+
                 _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
 
-                var customerId = _config.GetValue<int>("Service:CustomerId");               
+                       
 
                 var pkt = new ReadingPacket
                 {
@@ -58,17 +83,28 @@ namespace MeterReaderClient
                     pkt.Readings.Add(await _factory.Generate(customerId));
                 }
 
-                var result = await Client.AddReadingAsync(pkt);
-
-                if(result.Success == ReadingStatus.Success)
+                try
                 {
-                    _logger.LogInformation("Successfully sent");
-                }
-                else
-                {
-                    _logger.LogInformation("Failed to send");
-                }
+                    var result = await Client.AddReadingAsync(pkt);
 
+                    if(result.Success == ReadingStatus.Success)
+                    {
+                        _logger.LogInformation("Successfully sent");
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Failed to send");
+                    }
+                }
+                catch(RpcException ex)
+                {
+                    if(ex.StatusCode == StatusCode.OutOfRange)
+                    {
+                        _logger.LogError($"Trailer errors : {string.Join(",", ex.Trailers.Select(x => x.Key))} : {string.Join(",", ex.Trailers.Select(y => y.Value))}");
+                    }
+                    _logger.LogError($"Exception thrown {ex}");
+                }
+                
                 await Task.Delay(_config.GetValue<int>("Service:DelayInterval"), stoppingToken);
             }
         }

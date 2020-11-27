@@ -4,9 +4,11 @@ option csharp_namespace = "MeterReaderWeb.Services";
 
 import "enums.proto";
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
 
 service MeterReadingService {
  rpc AddReading (ReadingPacket) returns (StatusMessage);
+ rpc SendDiagnostics(stream ReadingMessage) returns (google.protobuf.Empty);
 }
 
 message ReadingPacket {
