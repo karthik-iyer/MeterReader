@@ -20,6 +20,8 @@ namespace MeterReaderClient
         private readonly ReadingFactory _factory;
         private readonly ILoggerFactory _loggerFactory;
         private MeterReadingService.MeterReadingServiceClient _client = null;
+        private string _token;
+        private DateTime _expiration = DateTime.MinValue;
 
         public Worker(ILogger<Worker> logger, IConfiguration config , ReadingFactory factory, ILoggerFactory loggerFactory)
         {
@@ -28,6 +30,8 @@ namespace MeterReaderClient
             _factory = factory;
             _loggerFactory = loggerFactory;
         }
+
+        protected bool NeedsLogin() => string.IsNullOrWhiteSpace(_token) || _expiration > DateTime.UtcNow;
 
         protected MeterReadingService.MeterReadingServiceClient Client
         {
@@ -85,16 +89,24 @@ namespace MeterReaderClient
 
                 try
                 {
-                    var result = await Client.AddReadingAsync(pkt);
+                    if(!NeedsLogin() || await GenerateToken())
+                    {
 
-                    if(result.Success == ReadingStatus.Success)
-                    {
-                        _logger.LogInformation("Successfully sent");
+                        var headers = new Metadata();
+                        headers.Add("Authorization", $"Bearer {_token}");
+
+                        var result = await Client.AddReadingAsync(pkt, headers:headers);
+
+                        if (result.Success == ReadingStatus.Success)
+                        {
+                            _logger.LogInformation("Successfully sent");
+                        }
+                        else
+                        {
+                            _logger.LogInformation("Failed to send");
+                        }
                     }
-                    else
-                    {
-                        _logger.LogInformation("Failed to send");
-                    }
+                   
                 }
                 catch(RpcException ex)
                 {
@@ -107,6 +119,27 @@ namespace MeterReaderClient
                 
                 await Task.Delay(_config.GetValue<int>("Service:DelayInterval"), stoppingToken);
             }
+        }
+
+        private async Task<bool> GenerateToken()
+        {
+            var username = _config["Service:Username"];
+            var password = _config["Service:Password"];
+            var tokenRequest = new TokenRequest()
+            {
+                Username = username,
+                Password = password
+            };            
+
+            var tokenResponse = await Client.CreateTokenAsync(tokenRequest);
+
+            if(tokenResponse.Success)
+            {
+                _token = tokenResponse.Token;
+                _expiration = tokenResponse.Expiration.ToDateTime();
+                return true;
+            }
+            return false;
         }
     }
 }
